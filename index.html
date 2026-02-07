@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TikTok H.264 Encoder</title>
+    <script src="coi-serviceworker.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+            -webkit-font-smoothing: antialiased;
+            background: #f5f5f7;
+            color: #1d1d1f;
+            min-height: 100dvh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+        }
+
+        .card {
+            background: #fff;
+            width: 100%;
+            max-width: 380px;
+            border-radius: 20px;
+            padding: 2.5rem 2rem 2rem;
+            text-align: center;
+        }
+
+        h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.025em; }
+        .sub { font-size: 0.875rem; color: #86868b; margin-top: 0.375rem; line-height: 1.4; }
+
+        .drop {
+            position: relative;
+            margin: 2rem 0 0;
+            border: 2px dashed #d2d2d7;
+            border-radius: 14px;
+            padding: 2rem 1rem;
+            transition: border-color 0.2s, background 0.2s;
+            cursor: pointer;
+        }
+        .drop:hover, .drop.over { border-color: #0071e3; background: #f0f5ff; }
+        .drop-label { font-size: 0.9375rem; color: #1d1d1f; font-weight: 500; }
+        .drop-hint { font-size: 0.75rem; color: #86868b; margin-top: 0.375rem; }
+        .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+        .progress { margin-top: 1.5rem; display: none; }
+        .progress.visible { display: block; }
+        .bar { height: 4px; background: #e8e8ed; border-radius: 999px; overflow: hidden; }
+        .fill { height: 100%; width: 0%; background: #0071e3; border-radius: 999px; transition: width 0.3s ease; }
+        .progress.pulse .fill { animation: pulse 1.6s ease-in-out infinite; }
+        @keyframes pulse { 50% { opacity: 0.35; } }
+        .bar-text { font-size: 0.75rem; color: #86868b; margin-top: 0.5rem; }
+
+        .status { font-size: 0.8125rem; color: #86868b; margin-top: 1.25rem; min-height: 1.5rem; }
+
+        .dl {
+            display: none; margin-top: 1.25rem; padding: 0.8125rem;
+            width: 100%; font-size: 0.9375rem; font-weight: 500;
+            color: #0071e3; background: #f0f5ff; border: none;
+            border-radius: 12px; cursor: pointer; text-decoration: none; text-align: center;
+            transition: background 0.2s;
+        }
+        .dl:hover { background: #e0ecff; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>TikTok H.264 Encoder</h1>
+        <p class="sub">Re-encode to H.264 / AAC</p>
+
+        <div class="drop" id="drop">
+            <div class="drop-label">Select or drop video</div>
+            <div class="drop-hint">.mp4 recommended</div>
+            <input type="file" id="file" accept="video/mp4,video/*">
+        </div>
+
+        <div class="progress" id="progress">
+            <div class="bar"><div class="fill" id="fill"></div></div>
+            <div class="bar-text" id="barText"></div>
+        </div>
+
+        <div class="status" id="status"></div>
+        <a class="dl" id="dl">Download fixed video</a>
+    </div>
+
+    <script type="module">
+        // Local import — worker.js resolves to same-origin, no cross-origin issues
+        import { FFmpeg } from './lib/ffmpeg/index.js';
+
+        const $ = id => document.getElementById(id);
+        const el = { status: $('status'), progress: $('progress'), fill: $('fill'), barText: $('barText'), dl: $('dl'), file: $('file'), drop: $('drop') };
+        let ffmpeg = null;
+
+        const pct = (v, t) => { el.fill.style.width = v + '%'; el.barText.textContent = t; };
+
+        // toBlobURL — fetch remote file and create same-origin blob URL
+        async function toBlobURL(url, type) {
+            const buf = await (await fetch(url)).arrayBuffer();
+            return URL.createObjectURL(new Blob([buf], { type }));
+        }
+
+        // Drag & drop
+        ['dragenter','dragover'].forEach(e => el.drop.addEventListener(e, ev => { ev.preventDefault(); el.drop.classList.add('over'); }));
+        ['dragleave','drop'].forEach(e => el.drop.addEventListener(e, () => el.drop.classList.remove('over')));
+        el.drop.addEventListener('drop', ev => { ev.preventDefault(); const f = ev.dataTransfer.files[0]; if (f) process(f); });
+        el.file.addEventListener('change', ev => { const f = ev.target.files?.[0]; if (f) process(f); });
+
+        async function init() {
+            el.status.textContent = 'Loading FFmpeg...';
+            el.progress.classList.add('visible');
+
+            try {
+                ffmpeg = new FFmpeg();
+                ffmpeg.on('log', ({ message }) => console.log(message));
+                ffmpeg.on('progress', ({ progress: p }) => {
+                    el.status.textContent = `Processing ${Math.round(p * 100)}%`;
+                });
+
+                const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+
+                pct(10, 'Loading core...');
+                const coreURL = await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript');
+
+                pct(30, 'Loading WASM (~32 MB)...');
+                const wasmURL = await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm');
+
+                pct(80, 'Initializing...');
+                el.progress.classList.add('pulse');
+                await ffmpeg.load({ coreURL, wasmURL });
+
+                el.progress.classList.remove('visible', 'pulse');
+                el.status.textContent = 'Ready';
+            } catch (err) {
+                console.error('Load failed:', err);
+                el.progress.classList.remove('visible', 'pulse');
+                el.status.textContent = 'Failed to load. Check console.';
+            }
+        }
+
+        async function process(file) {
+            if (!ffmpeg?.loaded) return alert('Still loading, please wait.');
+
+            el.dl.style.display = 'none';
+            el.status.textContent = 'Reading file...';
+
+            try {
+                await ffmpeg.writeFile('input.mp4', new Uint8Array(await file.arrayBuffer()));
+                el.status.textContent = 'Converting...';
+                await ffmpeg.exec(['-i', 'input.mp4', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', 'output.mp4']);
+
+                const out = await ffmpeg.readFile('output.mp4');
+                const url = URL.createObjectURL(new Blob([out.buffer], { type: 'video/mp4' }));
+                el.dl.href = url;
+                el.dl.download = `fixed_${file.name}`;
+                el.dl.style.display = 'block';
+                el.status.textContent = 'Done';
+            } catch (err) {
+                console.error(err);
+                el.status.textContent = 'Failed. Check console.';
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
